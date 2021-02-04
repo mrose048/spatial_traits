@@ -1,0 +1,348 @@
+---
+title: "Thorne Rapids Data"
+author: "Brooke Rose"
+date: "1/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r libraries}
+library("sf")
+library("raster")
+require(ggplot2)
+require(flora) # for removing the species names from the authors' names
+require(vroom) # read and write database
+require(janitor) # for cleaning columns names (very useful for integrating databases later)
+require(dplyr)
+require(tidyr)
+```
+
+```{r mac working directory}
+# Setting directories
+# working directory
+wd <- list()
+
+# commonly used paths in my working directory
+wd$data   <- "/Users/brookerose/Google Drive/Franklin_grant/project/data/"
+wd$output <- "/Users/brookerose/Google Drive/Franklin_grant/project/output/"
+```
+
+```{r extra data, echo = FALSE}
+# Environmental data
+env.stack <- stack(paste0(wd$output, 'predictors/env_stack/CFP_environmental_stack.grd')) # for coordinate reference system
+cfp <- st_read(paste0(wd$data,"shapefiles/CFP/CFP_GIS.shp"))
+cfp.trans <- st_transform(cfp, crs(env.stack))
+
+us_states <- st_read(paste0(wd$data, "shapefiles/tl_2019_us_state/tl_2019_us_state.shp"))
+california <- us_states %>%
+  filter(NAME == "California")
+```
+
+# Exploring Jim Thorne's rapid plot dataset
+
+## USDA Plant Codes
+```{r plant codes}
+plant_codes <- vroom::vroom(paste0(wd$data, 'Thorne_plots/California USDA Plants codes.csv'))
+str(plant_codes)
+plant_codes <- plant_codes %>% janitor::clean_names()
+```
+
+## EPSG Code Descriptions
+### 3309: NAD_1927_California_Teale_albers
+
+## Rapids data
+```{r rapids data}
+#ac_rapids <- read_csv(paste0(wd$data, 'Thorne_plots/tbl_Rapid_A-C_GIS.csv')) # Species A-C
+#cp_rapids <- read_csv(paste0(wd$data, 'Thorne_plots/tbl_Rapid_C-P_GIS.csv')) # Species C-P
+#pz_rapids <- read_csv(paste0(wd$data, 'Thorne_plots/tbl_Rapid_P-Z_GIS.csv')) # Species P-Z
+
+all_rapids <-
+  list.files(paste0(wd$data, 'Thorne_plots'),
+             pattern = 'tbl_R',
+             full.names = T)  %>%
+  sapply(., vroom::vroom)
+```
+
+### Cleaning data
+```{r santiago cleaning code 1}
+all_rapids <- dplyr::bind_rows(all_rapids) 
+
+filt <- all_rapids %>% dplyr::select(-c(1:8)) %>% colnames %>% sort
+#filt #vector with species symbol
+
+# Database with accepted names
+plant_codes_accepted <-
+  plant_codes %>% dplyr::filter(symbol %in% filt)
+
+# Database with accepted and synonyms names for those columns names with synonyms
+plant_codes_synonym <-
+  plant_codes %>% dplyr::filter(synonym_symbol %in% filt)
+plant_codes_synonym <-
+  plant_codes %>% dplyr::filter(symbol %in% plant_codes_synonym$symbol)
+plant_codes_synonym <-
+  plant_codes_synonym %>% filter(synonym_symbol %in% filt |
+                                   is.na(synonym_symbol))
+
+rm(plant_codes)
+```
+
+#### Removing incorrect coordinates
+```{r santiago cleaning code 2}
+
+### Clean columns names 
+filt <- all_rapids %>% dplyr::select(c(1:8)) %>% names
+newnames <- all_rapids[1, filt] %>% 
+  janitor::clean_names() %>% names
+colnames(all_rapids)[1:8] <- newnames
+
+### Remove plot without coordinates
+cat("Total number of rapids plots: ", nrow(all_rapids))
+all_rapids <- all_rapids %>%
+  dplyr::filter(complete.cases(all_rapids %>% dplyr::select(x_final, y_final)))
+cat("Number of rapids plots with coordinates: ", nrow(all_rapids))
+
+### Remove plot with wrong coordinates
+all_rapids %>% ggplot(aes(x_final, y_final)) + 
+  geom_hex(bins=200) + 
+  coord_equal() + theme_minimal()
+all_rapids <- all_rapids %>% dplyr::filter(x_final<600000 & x_final >-500000)
+all_rapids %>% ggplot(aes(x_final, y_final)) + 
+  geom_hex(bins=200) + 
+  coord_equal() + theme_minimal()
+
+### Remove columns with species without any presence
+filt <- all_rapids %>% dplyr::select(c(1:8)) %>% names
+pres_col <- colSums(all_rapids %>% dplyr::select(-filt), na.rm = T)
+pres_col <- pres_col[pres_col>0] %>% names
+
+all_rapids <- all_rapids %>% dplyr::select(c(1:8), {pres_col}) 
+all_rapids <- all_rapids %>% dplyr::select(-old_plot_id, -elev_orig)
+
+# nrow(all_rapids)
+cat("Number of species with at least one presence point: ", length(pres_col))
+
+### Fill with zero in those columns with species names
+all_rapids <-
+  all_rapids %>% 
+  dplyr::mutate(dplyr::across(pres_col, ~ tidyr::replace_na(.x, 0)))
+
+all_rapids <- all_rapids %>% arrange(new_id) #sort rows based on new_id
+
+### Remove  identical rows coordinates and summarize information at new_id level 
+all_rapids %>% dplyr::count(new_id) %>% arrange(desc(n)) #almost all new_id is repeated
+
+df2 <- # unique data for each plot
+  all_rapids %>% dplyr::select(-c('total', pres_col)) %>% unique
+
+df3 <- all_rapids %>% # summarizing species records by plot 
+  dplyr::select(c('new_id', c('total', pres_col))) %>%
+  group_by(new_id) %>%
+  summarise(across(c('total', pres_col), ~ sum(.x)))
+
+all_rapids2 <- dplyr::left_join(df2, df3, by = "new_id")
+#dim(all_rapids)
+cat("Dimensions of clean data frame: ", dim(all_rapids2))
+all_rapids <- all_rapids2
+rm(all_rapids2)
+
+# nrow(unique(all_rapids)) == nrow(all_rapids) # all rows are unique. however there are plot with same coordinates 
+# which not does not necessarily represent duplicate coordinates with different species composition
+
+### Exploring plot without any species
+rowfilt <- all_rapids[pres_col] %>% colSums()
+cat("All plots have at least one presence: ", range(rowfilt)) # all plots have presences 
+
+# some plots
+all_rapids %>% ggplot(aes(x_final, y_final)) + 
+  geom_hex(bins=200) + 
+  coord_equal() + theme_minimal()
+
+# Save a cleaned database
+vroom::vroom_write(all_rapids, paste0(wd$data, "Thorne_plots/cleaned_rapid_study_species.gz"))
+```
+
+```{r data with species names}
+
+#### Database with species names ####
+all_rapids <- vroom::vroom(paste0(wd$data, "Thorne_plots/cleaned_rapid_study_species.gz"))
+filt <- names(all_rapids)[1:6]
+pres_col <- names(all_rapids)[-c(1:6)]
+
+for( i in 1:length(pres_col)){
+  message('processing species name ', i)
+  
+  sp_symbol <- pres_col[i]
+  if(sp_symbol %in% plant_codes_accepted$symbol) {
+    sp_names <- plant_codes_accepted %>%
+      dplyr::filter(symbol %in% sp_symbol) %>%
+      pull(scientific_name_with_author)
+    sp_names <- flora::remove.authors(sp_names)
+    pres_col2 <- pres_col[i]
+    names(pres_col2) <- sp_names
+    all_rapids <- dplyr::rename(all_rapids, pres_col2)
+
+  } else if (sp_symbol %in% plant_codes_synonym$synonym_symbol) {
+    message('Updating species names')
+    sp_symbol2 <- plant_codes_synonym %>%
+      dplyr::filter(synonym_symbol %in% sp_symbol) %>% #note here is used synonym_symbol
+      pull(symbol) #here is extracted the accepted names symbol
+    sp_names <- plant_codes_synonym %>%
+      dplyr::filter(symbol %in% sp_symbol2) %>%
+      dplyr::filter(is.na(synonym_symbol)) %>%
+      pull(scientific_name_with_author)
+
+    sp_names <- flora::remove.authors(sp_names)
+    pres_col2 <- pres_col[i]
+    names(pres_col2) <- sp_names
+    all_rapids <- dplyr::rename(all_rapids, pres_col2)
+    
+  } else {
+    message('This species code has no species names in USDA database')
+  }
+}
+
+vroom::vroom_write(all_rapids, 
+                   paste0(wd$data, "Thorne_plots/Thorne_rapids_cleaned_w_sp_names.gz"))
+
+```
+
+
+## Study Species Codes
+```{r species code list}
+sp.list <- c('WyptID', 'ABMA', 'ABMAS2', 'ABMAS', 'ABMAC', 'ABBR', 'ACIL',
+             'ACMI2', 'ACMIA', 'ACMIF', 'ACMIA2', 'ACMIM4', 'ACMIC', 'ACMIM2','ACMIO', 'ACMIL', 
+             'ACMIO2', 'ACMIP5', 'ACMIA4', 'ACMIG2', 'ACMIL3', 'ACMIR', 'ACMIR2',
+             'ADSP', 'AECA', 'ARCA33', 'ARGLC', 'ARGL3', 'ARGLA2', 'ARGLA', 'ARGLC4', 
+             'ARGLC2', 'ARGLG3', 'ARGLC3', 'ARGLG4', 'ARGLM2', 'ARGLM', 'ARGLZ2', 
+             'ARGLH2', 'ARGLH', 'ARGLZ', 'ARRA7', 'ARRU2', 'ARCAB3', 'ARRO4', 'CADE27', 'CAAL2', 
+             'CAALR', 'CAPU2', 'CAOB', 'CATI3', 'CEGRP', 'CEGRP2', 'CEPE6', 'CEGR', 'CEGRV2', 'CEME', 
+             'CEMEI', 'CEMEI2', 'CEMEM2', 'CEMEP', 'CEOL', 'CEOLO5', 'CEOLO', 'CESO2', 
+             'CEOLS', 'CEOLS2', 'CETO', 'CETOO2', 'CETOO', 'CEVE2', 'CHFO', 'CHOR', 'COCA23',
+             'COCOC', 'COCA23', 'COCOC9', 'DECO13', 'DEHAH', 'DEHEH2', 'DEHE', 'DEHEC', 'DEHEH', 
+             'DEHEP', 'DEPAP5', 'DEHES2', 'DERE2', 'DEHER', 'ERER11', 'ERPE5', 'ERPEP4', 'ERPES2', 
+             'ERPEV', 'ERAR11', 'ERARA', 'ERARH', 'ERARP', 'ERARP2', 'GAAN2', 'GAANA2', 
+             'GAANB2', 'GAAND', 'GAANS', 'GAANT', 'GAANB', 'GAANF', 'GAANF2', 'GAANG2',
+             'GAANG3', 'GAANJ', 'GAANN', 'GAANO', 'GAANO2', 'GAJE', 'GAANS2', 'GAJO', 
+             'GAANP2', 'HASQ2', 'HASQG2', 'HASQO2', 'HASQS2', 'HEFO10', 'CUFO2', 'HESA17', 
+             'HEST10', 'HEAR5', 'HEARA2', 'HEARC2', 'HEARM', 'JUCA', 'JUCAC5', 'JUCAQ', 
+             'JUCAQ2', 'JUHI', 'JUCAH', 'KEAN', 'KEANA', 'KEANA3', 'KEANM', 'KEANM2', 
+             'LECA3', 'LUAR', 'LUEX2', 'LUARE', 'LUTI', 'LUTIL', 'LUTIT', 'MICA3', 'MICAE', 
+             'MICAG', 'MICAR', 'MICAV', 'ERCA23', 'MIGL2', 'MIGUG', 'MIGU', 'MIGUA', 
+             'MIGUA2', 'MIGUH', 'MIGUL2', 'MIGUM', 'MIGUS', 'MIGUA3', 'MIGUD', 'MIGUD2', 
+             'MIGUG3', 'MIGUG2', 'MIGUH2', 'MIGUI', 'MIGUL4', 'MIGUL3', 'MIGUM2', 'MIGUN', 'MIGUP', 
+             'MILE2', 'MIOB2', 'PHIN13', 'PHINC2', 'PHINI4', 'PIBR', 'PIMO5', 'PIMOM', 'PIMOT2',
+             'PIMOT', 'PIAT', 'PIBA', 'PIPAA', 'PIBAB', 'PICO3', 'PIJE', 'PILA', 'PIMU', 
+             'PIMUB2', 'PIMUS2', 'PIMUB', 'PIMUM', 'PIMUR2', 'PIMUS', 'PISA2', 'POST11', 
+             'ARAN7', 'POAN5', 'POANA2', 'POANC', 'POANS2', 'POANY', 'POANE', 'POANP', 
+             'POAANG', 'POANL2', 'POANR2', 'PSMA', 'PTKI', 'STKI', 'QUDO', 'QUDU', 
+             'QUDUD', 'QUDUE', 'QUDUM2', 'QUDUT', 'QUAL2', 'QUDUA2', 'QUDUK', 'QUMA4', 'QUEN', 
+             'QULO', 'QULOA', 'QULOI', 'QULOT', 'QULOW', 'QUSA2', 'QUWI2', 'QUWIF', 
+             'QUWIW', 'FRRUM', 'RHRUM', 'RHRUO', 'RHRU', 'RHRUY', 'RILA2', 'SCCA3', 'LECA3',
+             'RILA2', 'RIMA', 'RIMAM', 'RIMAC', 'RIMAV', 'SALE3', 'SESE3', 'TOCA', 'TRLA3',
+             'UMCAC', 'UMCA', 'UMCAF', 'VILA3', 'XYBI')
+```
+
+## Rapids Data
+### What are the data sources for the rapid plots?
+```{r data sources}
+rapids_sarea <- c(unique(all_rapids$sarea))
+print(rapids_sarea)
+```
+
+### Number of rapid plots by source
+```{r notes on data sources}
+rapid_source <- all_rapids %>% group_by(sarea) %>% summarise(count=n())
+rapid_source
+```
+
+### Converting plot data to Spatial Feature 
+#### These data use EPSG 3309 (NAD_1927_California_Teale_albers)
+
+```{r rapids plots}
+rapids_sf <- st_as_sf(all_rapids %>% filter(sarea != 'PCTM'), coords = c('x_final', 'y_final'), crs = 3309) # converting to spatial object
+rapids_trans <- st_transform(rapids_sf, crs(env.stack))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = rapids_trans, aes(color = sarea))
+```
+
+### Plots with sketchy coordinates
+#### PCT: These seem to follow the Pacific Crest Trail, maybe pretty biased? 
+
+```{r PCTM plots}
+pctm_sf <- st_as_sf(all_rapids %>% filter(sarea == 'PCTM'), coords = c('x_final', 'y_final'), crs = 3309) # converting to spatial object
+pctm_trans <- st_transform(pctm_sf, crs(env.stack))
+cat("Number of PCTM plots total: ", nrow(pctm_trans))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = pctm_trans, aes(color = sarea))
+
+pctm_cfp <- st_intersection(pctm_trans, st_make_valid(cfp.trans)) # selecting only PCTM in CFP
+cat("Number of PCTM plots in CFP: ", nrow(pctm_cfp))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = pctm_cfp, aes(color = sarea))
+```
+
+#### CNPS: California Native Plant Society
+##### 6 plots have "off" coordinates, these plots also use EPSG 3309 (NAD_1927_California_Teale_albers)
+
+```{r CNPS plots}
+cnps_sf <- st_as_sf(all_rapids %>% filter(sarea == 'CNPS'), coords = c('x_final', 'y_final'), crs = 3309) # converting to spatial object
+cnps_trans <- st_transform(cnps_sf, crs(env.stack))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = cnps_trans, aes(color = sarea))
+
+cnps_cfp <- st_intersection(cnps_trans, cfp.trans) # selecting only CNPS in CFP
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = cnps_cfp, aes(color = sarea))
+```
+
+#### CARZ
+
+```{r CARZ plots}
+carz_sf <- st_as_sf(all_rapids %>% filter(sarea == 'CARZ'), coords = c('x_final', 'y_final'), crs = 3309) # converting to spatial object
+carz_trans <- st_transform(carz_sf, crs(env.stack))
+cat("Number of CARZ plots total: ", nrow(carz_trans))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = carz_trans, aes(color = sarea))
+
+carz_cfp <- st_intersection(carz_trans, cfp.trans) # selecting only CNPS in CFP
+cat("Number of CARZ plots in CFP: ", nrow(carz_cfp))
+```
+
+
+### Integrating the plots
+The final data include our study species with plots that are located within the California Floristic Province. 
+
+```{r integrating data}
+rapids2_sf <- st_as_sf(all_rapids, coords = c('x_final', 'y_final'), crs = 3309) # converting to spatial object
+rapids2_trans <- st_transform(rapids2_sf, crs(env.stack))
+rapids_cfp <- st_intersection(rapids2_trans, st_make_valid(cfp.trans))
+cat("Number of rapid plots in CFP: ", nrow(rapids_cfp))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = rapids_cfp, aes(color = sarea))
+
+rapids_sp <- rapids_cfp %>%
+  dplyr::mutate(X = sf::st_coordinates(.)[,1],
+                Y = sf::st_coordinates(.)[,2])
+
+
+vroom::vroom_write(rapids_sp, paste0(wd$data, "Thorne_plots/final_compiled_rapid.gz"))
+```

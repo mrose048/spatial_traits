@@ -1,0 +1,404 @@
+---
+title: "Thorne Relevee Data"
+author: "Brooke Rose"
+date: "1/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r libraries}
+library("sf")
+library("raster")
+require(ggplot2)
+require(flora) # for removing the species names from the authors' names
+require(vroom) # read and write database
+require(janitor) # for cleaning columns names (very useful for integrating databases later)
+require(dplyr)
+require(tidyr)
+```
+
+```{r mac working directory}
+# Setting directories
+# working directory
+wd <- list()
+
+# commonly used paths in my working directory
+wd$data   <- "/Users/brookerose/Google Drive/Franklin_grant/project/data/"
+wd$output <- "/Users/brookerose/Google Drive/Franklin_grant/project/output/"
+```
+
+```{r extra data, echo = FALSE}
+# Environmental data
+env.stack <- stack(paste0(wd$output, 'predictors/env_stack/BCM1981_2010_CFP_Stack.grd')) # for coordinate reference system
+cfp <- st_read(paste0(wd$data,"shapefiles/CFP/CFP_GIS.shp"))
+cfp.trans <- st_transform(cfp, crs(env.stack))
+
+us_states <- st_read(paste0(wd$data, "shapefiles/tl_2019_us_state/tl_2019_us_state.shp"))
+california <- us_states %>%
+  filter(NAME == "California")
+```
+
+# Exploring Jim Thorne's relevee dataset
+
+```{r usda plant codes}
+plant_codes <- vroom::vroom(paste0(wd$data, 'Thorne_plots/California USDA Plants codes.csv'))
+str(plant_codes)
+plant_codes <- plant_codes %>% janitor::clean_names()
+```
+
+## EPSG Code Descriptions
+### 3309: NAD_1927_California_Teale_albers
+### 32610: UTM zone 10N
+
+## Relevee data
+
+```{r relevee data}
+#ac_releve <- read_csv(paste0(wd$data, 'Thorne_plots/Relevees_A_C.csv'))
+#cp_releve <- read_csv(paste0(wd$data, 'Thorne_plots/Relevees_C_P.csv'))
+#pz_releve <- read_csv(paste0(wd$data, 'Thorne_plots/Relevees_P_Z.csv'))
+
+all_releves <-
+  list.files(paste0(wd$data, 'Thorne_plots'),
+             pattern = 'Relevees_',
+             full.names = T)  %>%
+  sapply(., vroom::vroom)
+```
+
+### Cleaning data
+```{r santiago cleaning code 1}
+all_releves <- dplyr::bind_rows(all_releves) 
+
+filt <- all_releves %>% dplyr::select(-c(1:7)) %>% colnames %>% sort
+#filt #vector with species symbol
+
+# Database with accepted names
+plant_codes_accepted <-
+  plant_codes %>% dplyr::filter(symbol %in% filt)
+
+# Database with accepted and synonyms names for those columns names with synonyms
+plant_codes_synonym <-
+  plant_codes %>% dplyr::filter(synonym_symbol %in% filt)
+plant_codes_synonym <-
+  plant_codes %>% dplyr::filter(symbol %in% plant_codes_synonym$symbol)
+plant_codes_synonym <-
+  plant_codes_synonym %>% filter(synonym_symbol %in% filt |
+                                   is.na(synonym_symbol))
+
+rm(plant_codes)
+```
+
+#### Removing incorrect coordinates
+```{r santiago cleaning code 2}
+
+### Clean columns names 
+filt <- all_releves %>% dplyr::select(c(1:7)) %>% names
+newnames <- all_releves[1, filt] %>% 
+  janitor::clean_names() %>% names
+colnames(all_releves)[1:7] <- newnames
+
+### Remove plot without coordinates
+cat("Total number of rapids plots: ", nrow(all_releves))
+all_releves <- all_releves %>%
+  dplyr::filter(complete.cases(all_releves %>% dplyr::select(lon, lat)))
+cat("Number of rapids plots with coordinates: ", nrow(all_releves))
+
+### Remove plot with wrong coordinates
+all_releves %>% ggplot(aes(lon, lat)) + 
+  geom_hex(bins=200) + 
+  coord_equal() + theme_minimal()
+
+### Remove columns with species without any presence
+filt <- all_releves %>% dplyr::select(c(1:7)) %>% names
+pres_col <- colSums(all_releves %>% dplyr::select(-filt), na.rm = T)
+pres_col <- pres_col[pres_col>0] %>% names
+
+all_releves <- all_releves %>% dplyr::select(c(1:7), {pres_col}) 
+all_releves <- all_releves %>% dplyr::select(-old_plot_id)
+
+# nrow(all_releves)
+cat("Number of species with at least one presence point: ", length(pres_col))
+
+### Fill with zero in those columns with species names
+all_releves <-
+  all_releves %>% 
+  dplyr::mutate(dplyr::across(pres_col, ~ tidyr::replace_na(.x, 0)))
+
+all_releves <- all_releves %>% arrange(new_id) #sort rows based on new_id
+
+### Remove  identical rows coordinates and summarize information at new_id level 
+all_releves %>% dplyr::count(new_id) %>% arrange(desc(n)) #almost all new_id is repeated
+
+df2 <- # unique data for each plot
+  all_releves %>% dplyr::select(-c('total_of_old_plot_id', pres_col)) %>% unique
+
+df3 <- all_releves %>% # summarizing species records by plot 
+  dplyr::select(c('new_id', c('total_of_old_plot_id', pres_col))) %>%
+  group_by(new_id) %>%
+  summarise(across(c('total_of_old_plot_id', pres_col), ~ sum(.x)))
+
+all_releves2 <- dplyr::left_join(df2, df3, by = "new_id")
+#dim(all_releves)
+cat("Dimensions of clean data frame: ", dim(all_releves2))
+all_releves <- all_releves2
+rm(all_releves2)
+
+# nrow(unique(all_releves)) == nrow(all_releves) # all rows are unique. however there are plot with same coordinates 
+# which not does not necessarily represent duplicate coordinates with different species composition
+
+### Exploring plot without any species
+rowfilt <- all_releves[pres_col] %>% colSums()
+cat("All plots have at least one presence: ", range(rowfilt)) # all plots have presences but ZZZD has 78,033
+```
+
+```{r data with species names}
+
+#### Database with species names ###
+
+for( i in 1:length(pres_col)){
+  message('processing species name ', i)
+  
+  sp_symbol <- pres_col[i]
+  if(sp_symbol %in% plant_codes_accepted$symbol) {
+    sp_names <- plant_codes_accepted %>%
+      dplyr::filter(symbol %in% sp_symbol) %>%
+      pull(scientific_name_with_author)
+    sp_names <- flora::remove.authors(sp_names)
+    pres_col2 <- pres_col[i]
+    names(pres_col2) <- sp_names
+    all_releves <- dplyr::rename(all_releves, pres_col2)
+
+  } else if (sp_symbol %in% plant_codes_synonym$synonym_symbol) {
+    message('Updating species names')
+    sp_symbol2 <- plant_codes_synonym %>%
+      dplyr::filter(synonym_symbol %in% sp_symbol) %>% #note here is used synonym_symbol
+      pull(symbol) #here is extracted the accepted names symbol
+    sp_names <- plant_codes_synonym %>%
+      dplyr::filter(symbol %in% sp_symbol2) %>%
+      dplyr::filter(is.na(synonym_symbol)) %>%
+      pull(scientific_name_with_author)
+
+    sp_names <- flora::remove.authors(sp_names)
+    pres_col2 <- pres_col[i]
+    names(pres_col2) <- sp_names
+    all_releves <- dplyr::rename(all_releves, pres_col2)
+    
+  } else {
+    message('This species code has no species names in USDA database')
+  }
+}
+
+vroom::vroom_write(all_releves, 
+                   paste0(wd$data, "Thorne_plots/Thorne_releves_cleaned_w_sp_names.gz"))
+
+```
+
+## Study Species Codes
+```{r species code list}
+sp.list <- c('WyptID', 'ABMA', 'ABMAS2', 'ABMAS', 'ABMAC', 'ABBR', 'ACIL',
+             'ACMI2', 'ACMIA', 'ACMIF', 'ACMIA2', 'ACMIM4', 'ACMIC', 'ACMIM2','ACMIO', 'ACMIL', 
+             'ACMIO2', 'ACMIP5', 'ACMIA4', 'ACMIG2', 'ACMIL3', 'ACMIR', 'ACMIR2',
+             'ADSP', 'AECA', 'ARCA33', 'ARGLC', 'ARGL3', 'ARGLA2', 'ARGLA', 'ARGLC4', 
+             'ARGLC2', 'ARGLG3', 'ARGLC3', 'ARGLG4', 'ARGLM2', 'ARGLM', 'ARGLZ2', 
+             'ARGLH2', 'ARGLH', 'ARGLZ', 'ARRA7', 'ARRU2', 'ARCAB3', 'ARRO4', 'CADE27', 'CAAL2', 
+             'CAALR', 'CAPU2', 'CAOB', 'CATI3', 'CEGRP', 'CEGRP2', 'CEPE6', 'CEGR', 'CEGRV2', 'CEME',
+             'CEMEI', 'CEMEI2', 'CEMEM2', 'CEMEP', 'CEOL', 'CEOLO5', 'CEOLO', 'CESO2', 
+             'CEOLS', 'CEOLS2', 'CETO', 'CETOO2', 'CETOO', 'CEVE2', 'CHFO', 'CHOR', 'COCA23',
+             'COCOC', 'COCA23', 'COCOC9', 'DECO13', 'DEHAH', 'DEHEH2', 'DEHE', 'DEHEC', 'DEHEH', 
+             'DEHEP', 'DEPAP5', 'DEHES2', 'DERE2', 'DEHER', 'ERER11', 'ERPE5', 'ERPEP4', 'ERPES2', 
+             'ERPEV', 'ERAR11', 'ERARA', 'ERARH', 'ERARP', 'ERARP2', 'GAAN2', 'GAANA2', 
+             'GAANB2', 'GAAND', 'GAANS', 'GAANT', 'GAANB', 'GAANF', 'GAANF2', 'GAANG2',
+             'GAANG3', 'GAANJ', 'GAANN', 'GAANO', 'GAANO2', 'GAJE', 'GAANS2', 'GAJO', 
+             'GAANP2', 'HASQ2', 'HASQG2', 'HASQO2', 'HASQS2', 'HEFO10', 'CUFO2', 'HESA17', 
+             'HEST10', 'HEAR5', 'HEARA2', 'HEARC2', 'HEARM', 'JUCA', 'JUCAC5', 'JUCAQ', 
+             'JUCAQ2', 'JUHI', 'JUCAH', 'KEAN', 'KEANA', 'KEANA3', 'KEANM', 'KEANM2', 
+             'LECA3', 'LUAR', 'LUEX2', 'LUARE', 'LUTI', 'LUTIL', 'LUTIT', 'MICA3', 'MICAE', 
+             'MICAG', 'MICAR', 'MICAV', 'ERCA23', 'MIGL2', 'MIGUG', 'MIGU', 'MIGUA', 
+             'MIGUA2', 'MIGUH', 'MIGUL2', 'MIGUM', 'MIGUS', 'MIGUA3', 'MIGUD', 'MIGUD2', 
+             'MIGUG3', 'MIGUG2', 'MIGUH2', 'MIGUI', 'MIGUL4', 'MIGUL3', 'MIGUM2', 'MIGUN', 'MIGUP', 
+             'MILE2', 'MIOB2', 'PHIN13', 'PHINC2', 'PHINI4', 'PIBR', 'PIMO5', 'PIMOM', 'PIMOT2',
+             'PIMOT', 'PIAT', 'PIBA', 'PIPAA', 'PIBAB', 'PICO3', 'PIJE', 'PILA', 'PIMU', 
+             'PIMUB2', 'PIMUS2', 'PIMUB', 'PIMUM', 'PIMUR2', 'PIMUS', 'PISA2', 'POST11', 
+             'ARAN7', 'POAN5', 'POANA2', 'POANC', 'POANS2', 'POANY', 'POANE', 'POANP', 
+             'POAANG', 'POANL2', 'POANR2', 'PSMA', 'PTKI', 'STKI', 'QUDO', 'QUDU', 
+             'QUDUD', 'QUDUE', 'QUDUM2', 'QUDUT', 'QUAL2', 'QUDUA2', 'QUDUK', 'QUMA4', 'QUEN', 
+             'QULO', 'QULOA', 'QULOI', 'QULOT', 'QULOW', 'QUSA2', 'QUWI2', 'QUWIF', 
+             'QUWIW', 'FRRUM', 'RHRUM', 'RHRUO', 'RHRU', 'RHRUY', 'RILA2', 'SCCA3', 'LECA3',
+             'RILA2', 'RIMA', 'RIMAM', 'RIMAC', 'RIMAV', 'SALE3', 'SESE3', 'TOCA', 'TRLA3',
+             'UMCAC', 'UMCA', 'UMCAF', 'VILA3', 'XYBI')
+```
+
+## Relevee Data
+### What are the data sources for the relevee plots?
+```{r data sources}
+sarea <- c(unique(all_releves$sarea))
+print(sarea)
+```
+
+### Number of plots by source
+```{r notes on data sources}
+source_data <- all_releves %>% group_by(sarea) %>% summarise(count=n())
+source_data
+```
+
+### HARR 
+#### These data are in lat lon
+
+```{r harr plots}
+harr <- all_releves %>% filter(sarea == "HARR")
+harr_sf <- st_as_sf(harr, coords = c('lon', 'lat'), crs = st_crs(cfp))
+harr_trans <- st_transform(harr_sf, crs(env.stack))
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = harr_trans, aes(color = sarea))
+```
+
+### NAD83/UTM Zone 10N Plots
+These plots use UTM Zone 10N EPSG code 32610. Includes data from USFSN, PRGG, POTT, CCBLM, and SFHREL. In the Veg_PlotInfo_Dec2009_for_Maki.xls file, CCBLM is designated as a rapid survey (not relevee).
+
+```{r plots with epsg code 32610}
+utm_plots <- all_releves %>% filter(sarea == 'USFSN' | sarea == "PRGG"|
+                                     sarea == "POTT" | sarea == "CCBLM"| sarea == "SFHREL") %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 32610) %>%
+  st_transform(crs(env.stack))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = utm_plots, aes(color = sarea))
+```
+
+### NAD27 California Albers Plots
+These plots work with NAD27 California Albers and include data from VTM, BMC, and LPBO. 
+
+```{r plots with epsg code 3309}
+albers_plots <- all_releves %>% filter(sarea == "VTM" | sarea == 'BMC' | sarea == 'LPBO') %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 3309) %>%
+  st_transform(crs(env.stack))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = albers_plots %>% filter(sarea != "VTM"), aes(color = sarea))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = albers_plots %>% filter(sarea == "VTM"), aes(color = sarea))
+```
+
+### WGS 84/UTM zone 11N (EPSG Code: 32611)
+These plots seem to have EPSG Code 32611 (sources include SEKIAA, SEKIRA, and SEKIVM)
+
+```{r other sources}
+other_plots <- all_releves %>% filter(sarea == 'SEKIAA'| sarea == 'SEKIRA' | sarea == 'SEKIVM') %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 32611) %>%
+  st_transform(crs(env.stack))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = other_plots, aes(color = sarea))
+
+other_df <- all_releves %>% filter(sarea == 'SEKIAA'| sarea == 'SEKIRA' | sarea == 'SEKIVM')
+```
+
+### SAMO
+Seems inconsistent with the other unknown data. They look very similar to the UTM data. Also, in the Veg_PlotInfo_Dec2009_for Maki.xls file, these are labeled as rapids (not relevees). 2,606 plots.
+
+```{r samo plots}
+samo <- all_releves %>% filter(sarea == 'SAMO') %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 32611) %>%
+  st_transform(crs(env.stack)) %>%
+  filter(new_id != 'SAMOrap0027')  # from looking at the map in ArcGIS, this plot is pretty far east of the Santa Monica Mountains (it's also the only plot there and has no "presences" so I decided to exclude it to be safe)
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = samo, aes(color = sarea))
+
+#st_write(samo_plots, paste0(wd$data, "Thorne_plots/samo_plots.shp"), delete_layer = TRUE)
+#st_write(samo_plots, paste0(wd$data, "Thorne_plots/samo_plots.csv"), delete_layer = TRUE)
+```
+
+#### SAMO plots in the CFP
+Here, I select the SAMO data that are within the CFP (2,520 plots). This is the vast majority of the data. Minus the plot that is to the east, the other data line up well with the Santa Monica Mountains. I excluded one odd plot that was pretty far east of the Santa Monica Mountains (NewID = SAMOrap0027) - found using ArcGIS. 
+
+```{r samo plots in cfp}
+samo_cfp <- samo %>% 
+  st_intersection(st_make_valid(cfp.trans)) # from looking at the map in ArcGIS, this plot is pretty far east of the Santa Monica Mountains (it's also the only plot there and has no "presences" so I decided to exclude it to be safe)
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = samo_cfp, aes(color = sarea))
+```
+
+### SEKINRI
+Seems inconsistent with other known data CRS. The longitude values are in the 300's and the latitude values are in the 4,000's. I am thinking there are some missing digits in these data. 626 plots. FIXED: I ended up multiplying longitude and latitude by 1000. The data now match the other Sequoia/Kings Canyon data. 
+
+```{r sekinri plots}
+# original data
+sekinri_og <- all_releves %>% filter(sarea == 'SEKINRI') %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 32611) %>%
+  st_transform(crs(env.stack)) %>%
+  mutate(status = 'original_data')
+
+
+sekinri_new <- all_releves %>% filter(sarea == 'SEKINRI') %>%
+   mutate(new_lat = lat *1000,
+         new_lon = lon *1000) %>%
+  st_as_sf(coords = c('new_lon', 'new_lat'), crs = 32611) %>%
+  st_transform(crs(env.stack)) 
+
+names(sekinri_new)[names(sekinri_new) == "lat"] <- 'old_lat'
+names(sekinri_new)[names(sekinri_new) == "lon"] <- 'old_lon'
+  
+sekinri_new <- sekinri_new %>%
+  dplyr::select(-old_lat, -old_lon)
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = sekinri_og, aes(color = status)) +
+  geom_sf(data = sekinri_new, aes(color = status))
+
+
+
+```
+
+
+### Integrating the plots
+Here I integrate the plots and filter by location and species code. The final data include our study species with plots that are located within the California Floristic Province.
+
+```{r}
+int_plots <- dplyr::bind_rows(albers_plots, harr_trans, utm_plots, other_plots, samo, sekinri_new)
+
+relevee_sp <- int_plots %>%
+  st_as_sf() %>%
+  dplyr::mutate(lon = sf::st_coordinates(.)[,1],
+              lat = sf::st_coordinates(.)[,2])
+
+relevee_sp <- st_intersection(relevee_sp, st_make_valid(cfp.trans))
+cat("Number of relevee plots in CFP (including VTM): ", nrow(relevee_sp))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = relevee_sp, aes(color = sarea))
+
+vroom::vroom_write(relevee_sp, paste0(wd$data, "Thorne_plots/compiled_relevee_with_vtm.gz"))
+```
+
+### Removing VTM plots
+These are from the 1930's, maybe we will use them for another study. 
+```{r}
+relevee_novtm <- relevee_sp %>% filter(sarea != 'VTM') %>%
+dplyr::mutate(lon = sf::st_coordinates(.)[,1],
+              lat = sf::st_coordinates(.)[,2])
+cat("Number of relevee plots in CFP (minus VTM): ", nrow(relevee_novtm))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = relevee_novtm, aes(color = sarea))
+
+vroom::vroom_write(relevee_novtm, paste0(wd$data, "Thorne_plots/final_compiled_relevee_no_vtm.gz"))
+
+```

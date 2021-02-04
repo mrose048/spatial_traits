@@ -1,0 +1,253 @@
+---
+title: 'California Survey Plot Data: Rosie'
+author: "Brooke Rose"
+date: "01/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r mac working directory, eval = FALSE}
+# working directory
+wd <- list()
+
+# commonly used paths in my working directory
+wd$data   <- "/Users/brookerose/Google Drive/Franklin_grant/project/data/"
+wd$output <- "/Users/brookerose/Google Drive/Franklin_grant/project/output/"
+wd$scripts <- "/Users/brookerose/Google Drive/Franklin_grant/project/scripts/"
+```
+
+```{r franklin working directory}
+# working directory
+wd <- list()
+
+# commonly used paths in my working directory
+wd$data   <- "/Users/Brooke Rose/Google Drive/Franklin_grant/project/data/"
+wd$output <- "/Users/Brooke Rose/Google Drive/Franklin_grant/project/output/"
+wd$scripts <- "/Users/Brooke Rose/Google Drive/Franklin_grant/project/scripts/"
+wd$software <- "/Users/Brooke Rose/Google Drive/Franklin_grant/project/software/"
+```
+
+```{r loading libraries}
+library("sf")
+library("raster")
+require(ggplot2)
+require(flora) # for removing the species names from the authors' names
+require(vroom) # read and write database
+require(janitor) # for cleaning columns names (very useful for integrating databases later)
+require(dplyr)
+require(tidyr)
+library(fuzzySim)
+```
+
+```{r extra data, echo = FALSE}
+# Environmental data
+env.stack <- stack(paste0(wd$output, 'predictors/env_stack/CFP_environmental_stack.grd')) # for coordinate reference system
+cfp <- st_read(paste0(wd$data,"shapefiles/CFP/CFP_GIS.shp"))
+cfp.trans <- st_transform(cfp, crs(env.stack))
+
+us_states <- st_read(paste0(wd$data, "shapefiles/tl_2019_us_state/tl_2019_us_state.shp"))
+california <- us_states %>%
+  filter(NAME == "California")
+```
+
+# California Vegetation Survey Plots (from Rosie)
+Received November 26, 2019. Includes a total of 25,449 plots
+
+```{r Survey Plots}
+survey_plots <- st_read(paste0(wd$data, 'BIOS/Cal_survey_points/Cal_survey_plots.shp'))
+# Waypoint as character (for joining)
+survey_plots$WyptID <- as.character(survey_plots$WyptID)
+str(survey_plots)
+#survey_plots <- survey_plots %>% janitor::clean_names()
+```
+
+# Plant List with Plot ID's (Waypoint)
+List of plants at each plot, 461,718 "observations". Includes species name, code, species cover, and stratum (life form)
+
+```{r plant list}
+plant_list <- vroom::vroom(paste0(wd$data, 'BIOS/Cal_survey_points/SurveyPlants.csv'))
+str(plant_list)
+#plant_list <- plant_list %>% janitor::clean_names()
+```
+
+# Join survey plots and plant list
+Creates a data frame with the waypoint ID, survey type, survey date, National Vegetation Classification Name, location information, species code, species name, and species cover
+
+```{r joined dataframe}
+survey_join <- left_join(survey_plots %>% dplyr::select(WyptID, SurveyType, SurveyDate, NVCS_Name,
+                                                        geometry), 
+                         plant_list %>% dplyr::select(WaypointID, CodeSpecies, SpeciesName, Species_cover),
+                         by = c("WyptID" = "WaypointID"))
+
+str(survey_join)
+
+#st_write(survey_join, paste0(wd$data, "BIOS/Cal_survey_points/plot_plant_join.shp"), delete_layer = TRUE)
+#write_csv(survey_join %>% dplyr::select(-geometry), paste0(wd$data, "BIOS/Cal_survey_points/plot_plant_join.csv"))
+```
+
+
+# Converting data to  presence absence matrix
+
+```{r data cleaning}
+survey_df <- vroom::vroom(paste0(wd$data, "BIOS/Cal_survey_points/plot_plant_join.csv"))
+species_plots <- survey_df %>%
+  dplyr::select(WyptID, CodeSpecies)
+
+# converting plot/species data frame to species presence and absences
+pres_abs <- splist2presabs(species_plots, sites.col = "WyptID", 
+                           sp.col = "CodeSpecies", keep.n = FALSE)
+
+survey_data <- pres_abs %>%
+  right_join(survey_plots %>% dplyr::select(WyptID, geometry, SurveyType), by = c("WyptID" = "WyptID")) %>%
+  st_as_sf() %>%
+  dplyr::mutate(X = sf::st_coordinates(.)[,1],
+                Y = sf::st_coordinates(.)[,2]) %>%
+  st_set_geometry(NULL)
+
+filt <- survey_data %>% dplyr::select(-c(1)) %>% colnames %>% sort
+#filt #vector with species symbol
+
+# Database with accepted names
+plant_codes_accepted <-
+  plant_list %>% dplyr::filter(CodeSpecies %in% filt)
+
+rm(plant_list)
+```
+
+#### Removing incorrect coordinates
+```{r santiago cleaning code 2}
+
+### Remove plot without coordinates
+cat("Total number of rapids plots: ", nrow(survey_data))
+survey_data <- survey_data %>%
+  dplyr::filter(complete.cases(survey_data %>% dplyr::select(X, Y)))
+cat("Number of rapids plots with coordinates: ", nrow(survey_data))
+
+### Remove plot with wrong coordinates
+survey_data %>% ggplot(aes(X, Y)) + 
+  geom_hex(bins=200) + 
+  coord_equal() + theme_minimal()
+
+### Remove columns with species without any presence
+filt <- survey_data %>% dplyr::select(c(1)) %>% names
+survey_data[2:6512] <- lapply(survey_data[2:6512], as.numeric)
+pres_col <- colSums(survey_data %>% dplyr::select(-filt), na.rm = T)
+pres_col <- pres_col[pres_col>0] %>% names
+
+survey_data <- survey_data %>% dplyr::select(c(1:7), {pres_col}) 
+survey_data <- survey_data %>% dplyr::select(-old_plot_id)
+
+# nrow(survey_data)
+cat("Number of species with at least one presence point: ", length(pres_col))
+
+### Fill with zero in those columns with species names
+survey_data <-
+  survey_data %>% 
+  dplyr::mutate(dplyr::across(pres_col, ~ tidyr::replace_na(.x, 0)))
+
+survey_data <- survey_data %>% arrange(WyptID) #sort rows based on waypoint ID
+
+### Remove  identical rows coordinates and summarize information at waypoint level 
+survey_data %>% dplyr::count(WyptID) %>% arrange(desc(n)) #almost all waypoint is repeated
+
+df2 <- # unique data for each plot
+  survey_data %>% dplyr::select(-c(pres_col)) %>% unique
+
+df3 <- survey_data %>% # summarizing species records by plot 
+  dplyr::select(c('WyptID', c(pres_col))) %>%
+  group_by(WyptID) %>%
+  summarise(across(c(pres_col), ~ sum(.x)))
+
+survey_data2 <- dplyr::left_join(df2, df3, by = "WyptID")
+#dim(survey_data)
+cat("Dimensions of clean data frame: ", dim(survey_data2))
+survey_data <- survey_data2
+rm(survey_data2)
+
+nrow(unique(survey_data)) == nrow(survey_data) # all rows are unique. however there are plot with same coordinates 
+# which not does not necessarily represent duplicate coordinates with different species composition
+
+### Exploring plot without any species
+rowfilt <- survey_data[pres_col] %>% colSums()
+cat("All plots have at least one presence: ", range(rowfilt)) # all plots have presences but ZZZD has 78,033
+```
+
+```{r}
+cat("Total number of unique plots in CFW dataset: ", length(unique(survey_data$WyptID)))
+dups <- duplicated(survey_data[c('geometry')]) # remove duplicate coordinates
+survey_uniq <- survey_data[!dups,] # plots with unique coordinates
+cat(nrow(survey_data)-nrow(survey_uniq), "records removed with duplicate coordinates")
+survey_uniq <- survey_uniq[, !duplicated(colnames(survey_uniq))]
+
+```
+
+
+# Map of all survey plots
+
+```{r plotting}
+# Writing to file as gz file
+# So much faster than csv and shapefile
+vroom::vroom_write(survey_uniq, paste0(wd$data, "BIOS/Cal_survey_points/pres_abs_matrix.gz"))
+survey_df <- vroom::vroom(paste0(wd$data, "BIOS/Cal_survey_points/pres_abs_matrix.gz"))
+
+#write_csv(survey_uniq, paste0(wd$data, "BIOS/Cal_survey_points/pres_abs_matrix.csv"))
+#study_mat <- st_read(paste0(wd$data, "BIOS/Cal_survey_points/pres_abs_matrix.csv"))
+
+study_sf <- st_as_sf(survey_df, coords = c("X", "Y"), crs = 3310)  
+study_sf <- st_transform(study_sf, st_crs(cfp.trans)) # data frame of presence/absence for Compadre species with shapefile capabilities
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = study_sf, aes(color = SurveyType)) 
+
+cat("Total number of plots: ", nrow(study_sf))
+```
+
+```{r data source}
+cfw_sources <- study_sf %>%
+  dplyr::mutate(survey = ifelse(SurveyType == 'Transect' | SurveyType == 'Releve' | 
+                           SurveyType == 'Multivisit Releve' | SurveyType == 'releve' | 
+                           SurveyType == 'Multivisit Transect' |
+                           SurveyType == 'Multi-visit releve' | 
+                           SurveyType == 'multi-visit transect' | 
+                           SurveyType == 'Relevee', 'releve', 'rapid'),
+                X = sf::st_coordinates(.)[,1],
+                Y = sf::st_coordinates(.)[,2])
+
+cfw_cfp <- st_intersection(cfw_sources, st_make_valid(cfp.trans))
+cat("Total number of plots in the CFP: ", nrow(cfw_cfp))
+
+vroom::vroom_write(cfw_cfp, paste0(wd$data, "BIOS/Cal_survey_points/pres_abs_matrix_cfp.gz"))
+```
+
+# Cal Fish & Wildlife Data by Survey Type
+## Rapids
+
+```{r rapids}
+cfp_rapids <- cfw_cfp %>% filter(survey == 'rapid')
+cat("Total number of rapid plots in the CFP: ", nrow(cfp_rapids))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = cfp_rapids, aes(color = SurveyType)) 
+```
+
+## Relevees
+
+```{r relevees}
+cfp_releve <- cfw_cfp %>% filter(survey == 'releve')
+cat("Total number of relevee plots in the CFP: ", nrow(cfp_releve))
+
+ggplot() +
+  geom_sf(data = cfp.trans) +
+  geom_sf(data = cfp_releve, aes(color = SurveyType)) 
+
+
+```
+
