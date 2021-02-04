@@ -212,42 +212,6 @@ vroom::vroom_write(all_rapids,
 
 ```
 
-
-## Study Species Codes
-```{r species code list}
-sp.list <- c('WyptID', 'ABMA', 'ABMAS2', 'ABMAS', 'ABMAC', 'ABBR', 'ACIL',
-             'ACMI2', 'ACMIA', 'ACMIF', 'ACMIA2', 'ACMIM4', 'ACMIC', 'ACMIM2','ACMIO', 'ACMIL', 
-             'ACMIO2', 'ACMIP5', 'ACMIA4', 'ACMIG2', 'ACMIL3', 'ACMIR', 'ACMIR2',
-             'ADSP', 'AECA', 'ARCA33', 'ARGLC', 'ARGL3', 'ARGLA2', 'ARGLA', 'ARGLC4', 
-             'ARGLC2', 'ARGLG3', 'ARGLC3', 'ARGLG4', 'ARGLM2', 'ARGLM', 'ARGLZ2', 
-             'ARGLH2', 'ARGLH', 'ARGLZ', 'ARRA7', 'ARRU2', 'ARCAB3', 'ARRO4', 'CADE27', 'CAAL2', 
-             'CAALR', 'CAPU2', 'CAOB', 'CATI3', 'CEGRP', 'CEGRP2', 'CEPE6', 'CEGR', 'CEGRV2', 'CEME', 
-             'CEMEI', 'CEMEI2', 'CEMEM2', 'CEMEP', 'CEOL', 'CEOLO5', 'CEOLO', 'CESO2', 
-             'CEOLS', 'CEOLS2', 'CETO', 'CETOO2', 'CETOO', 'CEVE2', 'CHFO', 'CHOR', 'COCA23',
-             'COCOC', 'COCA23', 'COCOC9', 'DECO13', 'DEHAH', 'DEHEH2', 'DEHE', 'DEHEC', 'DEHEH', 
-             'DEHEP', 'DEPAP5', 'DEHES2', 'DERE2', 'DEHER', 'ERER11', 'ERPE5', 'ERPEP4', 'ERPES2', 
-             'ERPEV', 'ERAR11', 'ERARA', 'ERARH', 'ERARP', 'ERARP2', 'GAAN2', 'GAANA2', 
-             'GAANB2', 'GAAND', 'GAANS', 'GAANT', 'GAANB', 'GAANF', 'GAANF2', 'GAANG2',
-             'GAANG3', 'GAANJ', 'GAANN', 'GAANO', 'GAANO2', 'GAJE', 'GAANS2', 'GAJO', 
-             'GAANP2', 'HASQ2', 'HASQG2', 'HASQO2', 'HASQS2', 'HEFO10', 'CUFO2', 'HESA17', 
-             'HEST10', 'HEAR5', 'HEARA2', 'HEARC2', 'HEARM', 'JUCA', 'JUCAC5', 'JUCAQ', 
-             'JUCAQ2', 'JUHI', 'JUCAH', 'KEAN', 'KEANA', 'KEANA3', 'KEANM', 'KEANM2', 
-             'LECA3', 'LUAR', 'LUEX2', 'LUARE', 'LUTI', 'LUTIL', 'LUTIT', 'MICA3', 'MICAE', 
-             'MICAG', 'MICAR', 'MICAV', 'ERCA23', 'MIGL2', 'MIGUG', 'MIGU', 'MIGUA', 
-             'MIGUA2', 'MIGUH', 'MIGUL2', 'MIGUM', 'MIGUS', 'MIGUA3', 'MIGUD', 'MIGUD2', 
-             'MIGUG3', 'MIGUG2', 'MIGUH2', 'MIGUI', 'MIGUL4', 'MIGUL3', 'MIGUM2', 'MIGUN', 'MIGUP', 
-             'MILE2', 'MIOB2', 'PHIN13', 'PHINC2', 'PHINI4', 'PIBR', 'PIMO5', 'PIMOM', 'PIMOT2',
-             'PIMOT', 'PIAT', 'PIBA', 'PIPAA', 'PIBAB', 'PICO3', 'PIJE', 'PILA', 'PIMU', 
-             'PIMUB2', 'PIMUS2', 'PIMUB', 'PIMUM', 'PIMUR2', 'PIMUS', 'PISA2', 'POST11', 
-             'ARAN7', 'POAN5', 'POANA2', 'POANC', 'POANS2', 'POANY', 'POANE', 'POANP', 
-             'POAANG', 'POANL2', 'POANR2', 'PSMA', 'PTKI', 'STKI', 'QUDO', 'QUDU', 
-             'QUDUD', 'QUDUE', 'QUDUM2', 'QUDUT', 'QUAL2', 'QUDUA2', 'QUDUK', 'QUMA4', 'QUEN', 
-             'QULO', 'QULOA', 'QULOI', 'QULOT', 'QULOW', 'QUSA2', 'QUWI2', 'QUWIF', 
-             'QUWIW', 'FRRUM', 'RHRUM', 'RHRUO', 'RHRU', 'RHRUY', 'RILA2', 'SCCA3', 'LECA3',
-             'RILA2', 'RIMA', 'RIMAM', 'RIMAC', 'RIMAV', 'SALE3', 'SESE3', 'TOCA', 'TRLA3',
-             'UMCAC', 'UMCA', 'UMCAF', 'VILA3', 'XYBI')
-```
-
 ## Rapids Data
 ### What are the data sources for the rapid plots?
 ```{r data sources}
